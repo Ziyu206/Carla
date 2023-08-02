@@ -10,40 +10,56 @@ import numpy as np
 from carla import VehicleLightState
 
 
+# 根据天气和车辆状态实时更新车辆灯光信息
 def update_light_state(world):
+    # 获取天气信息
     weather = world.get_weather()
+    # 获取每辆车
     for vehicle in world.get_actors().filter('*vehicle*'):
+        # 获取每辆车的控制信息
         control = vehicle.get_control()
+        # 获取每辆车的灯光信息
         current_lights = vehicle.get_light_state()
+        # 当进入夜晚打开位置灯，打开远光灯以及内部灯
         if weather.sun_altitude_angle < 0:
             current_lights |= carla.VehicleLightState.Position
             current_lights |= carla.VehicleLightState.HighBeam
             current_lights |= carla.VehicleLightState.Interior
+        # 进入白天，关掉远灯及内部灯
         if weather.sun_altitude_angle > 0:
             current_lights &= 0b11011111011
+        # 当雾气浓度大于30或者降雨量大于30时，打开位置灯，近光灯以及雾灯
         if weather.fog_density > 30 or weather.precipitation > 30:
             current_lights |= carla.VehicleLightState.Position
             current_lights |= carla.VehicleLightState.LowBeam
             current_lights |= carla.VehicleLightState.Fog
+        # 当降雨小于30并且雾气浓度小于30时关闭近光灯以及雾灯
         if weather.fog_density < 30 and weather.precipitation < 30:
             current_lights &= 0b11101111101
+        # 当踩下刹车时，亮起刹车灯
         if control.brake > 0.1:
             current_lights |= carla.VehicleLightState.Brake
+        # 刹车松开，关闭刹车灯
         if control.brake <= 0.1:
             current_lights &= 0b11111110111
-        if control.steer < 0:
+        # 方向盘左转，亮起左转向灯
+        if control.steer < -0.1:
             current_lights |= carla.VehicleLightState.LeftBlinker
-        if control.steer > 0:
+        # 方向盘右转，亮起右转向灯
+        if control.steer > 0.1:
             current_lights |= carla.VehicleLightState.RightBlinker
+        # 方向回正，关闭所有转向灯
         if abs(control.steer) < 0.1:
             current_lights &= 0b11111001111
+        # 处于倒档时，亮起倒车灯
         if control.reverse:
             current_lights |= carla.VehicleLightState.Reverse
+        # 不处于倒档时，关闭倒车灯
         if not control.reverse:
             current_lights &= 0b11110111111
 
+        # 应用车灯信息
         vehicle.set_light_state(VehicleLightState(current_lights))
-
 
 def info(ego_vehicle,world):
     vehicles = world.get_actors().filter("*vehicle*")
@@ -59,19 +75,19 @@ def info(ego_vehicle,world):
             active_vehicle_num += 1
 
     _info_text = "Vehicle status: %d vehicles nearby" % (active_vehicle_num - 1)
-    # print(active_vehicle_num)
     return _info_text
 
+# 限值函数，将输入的参数限制在0到100中间后输出
 def clamp(value, minimum=0.0, maximum=100.0):
     return max(minimum, min(value, maximum))
 
-
+# 太阳类，用以控制太阳方位角和太阳高度较
 class Sun(object):
     def __init__(self, azimuth, altitude):
         self.azimuth = azimuth
         self.altitude = altitude
         self._t = 0.0
-
+    # 步进更新，更新太阳高度，方位角
     def tick(self, delta_seconds):
         self._t += 0.008 * delta_seconds
         self._t %= 2.0 * math.pi
@@ -79,10 +95,11 @@ class Sun(object):
         self.azimuth %= 360.0
         self.altitude = (70 * math.sin(self._t)) - 20
 
+    # 输出当前太阳高度，方位角
     def __str__(self):
         return 'Sun(alt: %.2f, azm: %.2f)' % (self.altitude, self.azimuth)
 
-
+# 风暴类用于控制降水，云雾，湿度，积水，风等
 class Storm(object):
     def __init__(self, precipitation):
         self._t = precipitation if precipitation > 0.0 else -50.0
@@ -94,6 +111,7 @@ class Storm(object):
         self.wind = 0.0
         self.fog = 0.0
 
+    # 更新风暴类中的所有参数，降水云雾等
     def tick(self, delta_seconds):
         delta = (1.3 if self._increasing else -1.3) * delta_seconds
         self._t = clamp(delta + self._t, -250.0, 100.0)
@@ -108,17 +126,18 @@ class Storm(object):
             self._increasing = True
         if self._t == 100.0:
             self._increasing = False
-
+    # 输出当前云量，降水和风强度
     def __str__(self):
         return 'Storm(clouds=%d%%, rain=%d%%, wind=%d%%)' % (self.clouds, self.rain, self.wind)
 
-
+# 天气类，包含太阳和风暴
 class Weather(object):
     def __init__(self, weather):
         self.weather = weather
         self._sun = Sun(weather.sun_azimuth_angle, weather.sun_altitude_angle)
         self._storm = Storm(weather.precipitation)
 
+    # 将自定义类太阳和风暴的参数传给weather
     def tick(self, delta_seconds):
         self._sun.tick(delta_seconds)
         self._storm.tick(delta_seconds)
@@ -131,44 +150,55 @@ class Weather(object):
         self.weather.sun_azimuth_angle = self._sun.azimuth
         self.weather.sun_altitude_angle = self._sun.altitude
 
+    # 输出当前天气参数
     def __str__(self):
         return '%s %s' % (self._sun, self._storm)
 
+# 计时器
 class CustomTimer:
+    # 使用本机时间作为计时器，如果报错则改用浮点秒数计时
     def __init__(self):
         try:
             self.timer = time.perf_counter
         except AttributeError:
             self.timer = time.time
-
+    # 返回计时器
     def time(self):
         return self.timer()
+
+# 显示控制器
 class DisplayManager:
+    # 根据输入窗口大小初始化现实控制器并启用硬件加速，双缓冲
     def __init__(self, grid_size, window_size):
         pygame.init()
         pygame.font.init()
         self.display = pygame.display.set_mode(window_size, pygame.HWSURFACE | pygame.DOUBLEBUF)
-
         self.grid_size = grid_size
         self.window_size = window_size
         self.sensor_list = []
 
+    # 返回整个窗口大小
     def get_window_size(self):
         return [int(self.window_size[0]), int(self.window_size[1])]
 
+    # 返回单个监视窗的大小
     def get_display_size(self):
         return [int(self.window_size[0] / self.grid_size[1]), int(self.window_size[1] / self.grid_size[0])]
 
+    #返回单个监视窗的位置
     def get_display_offset(self, gridPos):
         dis_size = self.get_display_size()
         return [int(gridPos[1] * dis_size[0]), int(gridPos[0] * dis_size[1])]
 
+    # 添加传感器
     def add_sensor(self, sensor):
         self.sensor_list.append(sensor)
 
+    # 获取传感器列表
     def get_sensor_list(self):
         return self.sensor_list
 
+    # 渲染画面并将画面输出
     def render(self):
         if not self.render_enabled():
             return
@@ -178,15 +208,19 @@ class DisplayManager:
 
         pygame.display.flip()
 
+    # 销毁传感器
     def destroy(self):
         for s in self.sensor_list:
             s.destroy()
 
+    # 渲染开关
     def render_enabled(self):
         return self.display != None
 
 
+# 传感器控制器
 class SensorManager:
+    # 初始化传感器，计时器等
     def __init__(self, world, display_man, sensor_type, transform, attached, sensor_options, display_pos):
         self.surface = None
         self.world = world
@@ -195,13 +229,13 @@ class SensorManager:
         self.sensor = self.init_sensor(sensor_type, transform, attached, sensor_options)
         self.sensor_options = sensor_options
         self.timer = CustomTimer()
-
         self.time_processing = 0.0
         self.tics_processing = 0
-
         self.display_man.add_sensor(self)
 
+    # 初始化传感器方法
     def init_sensor(self, sensor_type, transform, attached, sensor_options):
+        # 当输入传感器类型为RGBCamera时
         if sensor_type == 'RGBCamera':
             camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
             disp_size = self.display_man.get_display_size()
@@ -216,6 +250,7 @@ class SensorManager:
 
             return camera
 
+        # 当输入传感器类型为LiDAR时
         elif sensor_type == 'LiDAR':
             lidar_bp = self.world.get_blueprint_library().find('sensor.lidar.ray_cast')
             lidar_bp.set_attribute('range', '100')
@@ -235,6 +270,7 @@ class SensorManager:
 
             return lidar
 
+        # 当输入传感器类型为SemanticLiDAR时
         elif sensor_type == 'SemanticLiDAR':
             lidar_bp = self.world.get_blueprint_library().find('sensor.lidar.ray_cast_semantic')
             lidar_bp.set_attribute('range', '100')
@@ -248,6 +284,7 @@ class SensorManager:
 
             return lidar
 
+        # 当输入传感器类型为Radar时
         elif sensor_type == "Radar":
             radar_bp = self.world.get_blueprint_library().find('sensor.other.radar')
             for key in sensor_options:
@@ -258,6 +295,7 @@ class SensorManager:
 
             return radar
 
+        # 当输入传感器类型为DepthCamera时
         elif sensor_type == "DepthCamera":
             depth_camera_bp = self.world.get_blueprint_library().find('sensor.camera.depth')
             for key in sensor_options:
@@ -268,7 +306,7 @@ class SensorManager:
 
             return depth_camera
 
-
+        # 当输入传感器类型为SemanticSegmentationCamera时
         elif sensor_type == "SemanticSegmentationCamera":
             semantic_segmentation_camera_bp = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
             for key in sensor_options:
@@ -279,7 +317,7 @@ class SensorManager:
 
             return semantic_segmentation_camera
 
-
+        # 当输入传感器类型为InstanceSegmentationCamera时
         elif sensor_type == "InstanceSegmentationCamera":
             instance_segmentation_camera_bp = self.world.get_blueprint_library().find(
                 'sensor.camera.instance_segmentation')
@@ -294,9 +332,11 @@ class SensorManager:
         else:
             return None
 
+    # 获取传感器
     def get_sensor(self):
         return self.sensor
 
+    # 转化rgb图像，渲染并更新时间
     def save_rgb_image(self, image):
         t_start = self.timer.time()
 
@@ -313,10 +353,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
-
-
-
-
+    # 转化depth图像，渲染并更新时间
     def save_depth_image(self, image):
         t_start = self.timer.time()
 
@@ -333,7 +370,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
-
+    # 转化semantic_segmentation图像，渲染并更新时间
     def save_semantic_segmentation_image(self, image):
         t_start = self.timer.time()
 
@@ -350,6 +387,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
+    # 转化instance_segmentation图像，渲染并更新时间
     def save_instance_segmentation_image(self, image):
         t_start = self.timer.time()
 
@@ -366,7 +404,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
-
+    # 转化lidar数据，渲染并更新时间
     def save_lidar_image(self, image):
         t_start = self.timer.time()
 
@@ -393,6 +431,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
+    # 转化semanticlidar数据，渲染并更新时间
     def save_semanticlidar_image(self, image):
         t_start = self.timer.time()
 
@@ -419,6 +458,7 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
+    # 转换radar数据并更新时间
     def save_radar_image(self, radar_data):
         t_start = self.timer.time()
         points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))
@@ -428,11 +468,13 @@ class SensorManager:
         self.time_processing += (t_end - t_start)
         self.tics_processing += 1
 
+    # 渲染屏幕输出
     def render(self):
         if self.surface is not None:
             offset = self.display_man.get_display_offset(self.display_pos)
             self.display_man.display.blit(self.surface, offset)
 
+    # 摧毁传感器
     def destroy(self):
         self.sensor.destroy()
 
@@ -442,7 +484,7 @@ def main():
         # setup client并且加载我们所需要的地图
         client = carla.Client('localhost', 2000)
         client.set_timeout(120.0)
-        client.load_world('Town12')
+        client.load_world('Town10HD')
         num_walkers = 10
         num_vehicle = 20
         # 设置跑步的行人比例
@@ -514,7 +556,7 @@ def main():
                     # 将对应行人速度设置为跑步速度
                     walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
             # 从可生成行人的生成点中随机选择并生成随机行人，之后将生成的行人添加到同一批中
-            # walker_batch.append(world.try_spawn_actor(walker_bp, random.choice(ped_spawn_points)))
+            walker_batch.append(world.try_spawn_actor(walker_bp, random.choice(ped_spawn_points)))
 
         # 从蓝图库中寻找控制行人行动逻辑的控制器
         walker_ai_blueprint = world.get_blueprint_library().find('controller.ai.walker')
@@ -590,25 +632,26 @@ def main():
         # 令摄像头读取数据并存储(异步模式)
         #camera.listen(lambda image: image.save_to_disk(output_path % image.frame))
 
-        # Display Manager organize all the sensors an its display in a window
-        # If can easily configure the grid and the total window size
+
+        # 显示管理器根据输入的网格数量以及窗口大小自动划分并且管理各个传感器以及在窗口中的显示
+        # 在这里总共2行3列网格，整个窗口的大小是1920x1080像素
         display_manager = DisplayManager(grid_size=[2, 3], window_size=[1920,1080])
 
-        # Then, SensorManager can be used to spawn RGBCamera, LiDARs and SemanticLiDARs as needed
-        # and assign each of them to a grid position,
+        # 传感器管理器负责根据我们输入的属性去初始化传感器并且将最终的显示输出的位置进行管理，这里初始化了
+        # RGBCamera，DepthCamera，SemanticSegmentationCamera，InstanceSegmentationCamera
+        # LiDAR以及SemanticLiDAR共6个传感器，具体传感器属性参数含义请参考上一篇文章
         SensorManager(world, display_manager, 'DepthCamera',
                       carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+00)),
-                      ego_vehicle, {}, display_pos=[0, 0])
+                      ego_vehicle, {'fov':'90'}, display_pos=[0, 0])
         SensorManager(world, display_manager, 'RGBCamera',
                       carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+00)),
-                      ego_vehicle, {}, display_pos=[0, 1])
+                      ego_vehicle, {'fov':'90'}, display_pos=[0, 1])
         SensorManager(world, display_manager, 'SemanticSegmentationCamera',
                       carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+00)),
-                      ego_vehicle, {}, display_pos=[0, 2])
+                      ego_vehicle, {'fov':'90'}, display_pos=[0, 2])
         SensorManager(world, display_manager, 'InstanceSegmentationCamera',
                       carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+00)),
-                      ego_vehicle, {}, display_pos=[1, 1])
-
+                      ego_vehicle, {'fov':'90'}, display_pos=[1, 1])
         SensorManager(world, display_manager, 'LiDAR', carla.Transform(carla.Location(x=0, z=2.4)),
                       ego_vehicle,
                       {'channels': '64', 'range': '100', 'points_per_second': '250000', 'rotation_frequency': '20'},
@@ -618,14 +661,12 @@ def main():
                       {'channels': '64', 'range': '100', 'points_per_second': '100000', 'rotation_frequency': '20'},
                       display_pos=[1, 2])
 
-
         weather = Weather(world.get_weather())
         elapsed_time = 0.0
         world.get_spectator().set_transform(camera.get_transform())
         while True:
             info_text = info(ego_vehicle, world)
             update_light_state(world)
-            # sys.stdout.flush()
             # 从world中获取观察者视角，并将观察者视角的方位信息设置为相机的对应方位信息
             world.get_spectator().set_transform(camera.get_transform())
             display_manager.render()
@@ -634,24 +675,21 @@ def main():
             world.set_weather(weather.weather)
             sys.stdout.write('\r' + str(weather) + 12 * ' ')
             sys.stdout.write(info_text + 5 * ' ')
-
             sys.stdout.write(str(bin(ego_vehicle.get_light_state())) + ' ')
             speed = '%.2f' % (ego_vehicle.get_velocity().length() * 3.6)
             sys.stdout.write(str(speed) + ' km/h ')
             sys.stdout.flush()
-
             elapsed_time = 0.0
 
             # 如果为同步模式设定
             if traffic_manager.synchronous_mode:
-
-
                 # 更新模拟世界
                 world.tick()
                 # 从队列中读取传感器图像
                 image = image_queue.get()
                 # 将图像存储到本地路径(同步模式)
                 # image.save_to_disk(output_path % image.frame)
+
             # 如果为异步模式设定
             else:
                 # 更新模拟世界

@@ -1,3 +1,5 @@
+import math
+
 import carla
 import random
 import pygame
@@ -8,6 +10,7 @@ client = carla.Client('localhost', 2000)
 world = client.get_world()
 
 # 在同步模式下设置模拟器
+original_settings = world.get_settings()
 settings = world.get_settings()
 settings.synchronous_mode = True # Enables synchronous mode
 settings.fixed_delta_seconds = 0.05
@@ -24,12 +27,90 @@ random.seed(0)
 # 获取地图的刷出点
 spawn_point = random.choice(world.get_map().get_spawn_points())
 
-# 生成车辆并设置自动驾驶
+# 生成主车并设置自动驾驶
 vehicle_bp = random.choice(world.get_blueprint_library().filter('*vehicle*'))
 ego_vehicle = world.spawn_actor(vehicle_bp, spawn_point)
 ego_vehicle.set_autopilot(True)
 
+# 交通管理器设定主车无视信号灯
 traffic_manager.ignore_lights_percentage(ego_vehicle, 100)
+
+# 限值函数，将输入的参数限制在0到100中间后输出
+def clamp(value, minimum=0.0, maximum=100.0):
+    return max(minimum, min(value, maximum))
+
+# 太阳类，用以控制太阳方位角和太阳高度较
+class Sun(object):
+    def __init__(self, azimuth, altitude):
+        self.azimuth = azimuth
+        self.altitude = altitude
+        self._t = 0.0
+    # 步进更新，更新太阳高度，方位角
+    def tick(self, delta_seconds):
+        self._t += 0.008 * delta_seconds
+        self._t %= 2.0 * math.pi
+        self.azimuth += 0.25 * delta_seconds
+        self.azimuth %= 360.0
+        self.altitude = (70 * math.sin(self._t)) - 20
+
+    # 输出当前太阳高度，方位角
+    def __str__(self):
+        return 'Sun(alt: %.2f, azm: %.2f)' % (self.altitude, self.azimuth)
+
+# 风暴类用于控制降水，云雾，湿度，积水，风等
+class Storm(object):
+    def __init__(self, precipitation):
+        self._t = precipitation if precipitation > 0.0 else -50.0
+        self._increasing = True
+        self.clouds = 0.0
+        self.rain = 0.0
+        self.wetness = 0.0
+        self.puddles = 0.0
+        self.wind = 0.0
+        self.fog = 0.0
+
+    # 更新风暴类中的所有参数，降水云雾等
+    def tick(self, delta_seconds):
+        delta = (1.3 if self._increasing else -1.3) * delta_seconds
+        self._t = clamp(delta + self._t, -250.0, 100.0)
+        self.clouds = clamp(self._t + 40.0, 0.0, 90.0)
+        self.rain = clamp(self._t, 0.0, 80.0)
+        delay = -10.0 if self._increasing else 90.0
+        self.puddles = clamp(self._t + delay, 0.0, 85.0)
+        self.wetness = clamp(self._t * 5, 0.0, 100.0)
+        self.wind = 5.0 if self.clouds <= 20 else 90 if self.clouds >= 70 else 40
+        self.fog = clamp(self._t - 10, 0.0, 30.0)
+        if self._t == -250.0:
+            self._increasing = True
+        if self._t == 100.0:
+            self._increasing = False
+    # 输出当前云量，降水和风强度
+    def __str__(self):
+        return 'Storm(clouds=%d%%, rain=%d%%, wind=%d%%)' % (self.clouds, self.rain, self.wind)
+
+# 天气类，包含太阳和风暴
+class Weather(object):
+    def __init__(self, weather):
+        self.weather = weather
+        self._sun = Sun(weather.sun_azimuth_angle, weather.sun_altitude_angle)
+        self._storm = Storm(weather.precipitation)
+
+    # 将自定义类太阳和风暴的参数传给weather
+    def tick(self, delta_seconds):
+        self._sun.tick(delta_seconds)
+        self._storm.tick(delta_seconds)
+        self.weather.cloudiness = self._storm.clouds
+        self.weather.precipitation = self._storm.rain
+        self.weather.precipitation_deposits = self._storm.puddles
+        self.weather.wind_intensity = self._storm.wind
+        self.weather.fog_density = self._storm.fog
+        self.weather.wetness = self._storm.wetness
+        self.weather.sun_azimuth_angle = self._sun.azimuth
+        self.weather.sun_altitude_angle = self._sun.altitude
+
+    # 输出当前天气参数
+    def __str__(self):
+        return '%s %s' % (self._sun, self._storm)
 
 # 渲染对象来保持和传递PyGame表面
 class RenderObject(object):
@@ -178,6 +259,16 @@ while not crashed:
         controlObject.parse_control(event)
 
 # 结束
+
+# 获得当前模拟世界设定
+settings = world.get_settings()
+# 设定为异步模式
+settings.synchronous_mode = False
+# 设定为可变时间步长
+settings.fixed_delta_seconds = None
+# 应用设定
+world.apply_settings(settings)
+
 ego_vehicle.destory()
 camera.stop()
 pygame.quit()
